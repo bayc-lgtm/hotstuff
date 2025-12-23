@@ -144,12 +144,19 @@ class InstanceManager:
                 {
                     "Name": "description",
                     "Values": [
-                        "Canonical, Ubuntu, 22.04 LTS, amd64 jammy image build on 2023-09-19"
+                        "Canonical, Ubuntu, 22.04, amd64 jammy image"
                     ],
                 }
             ]
         )
         return response["Images"][0]["ImageId"]
+
+    def _get_first_az(self, client):
+        # Get the first available AZ in the region
+        response = client.describe_availability_zones(
+            Filters=[{"Name": "state", "Values": ["available"]}]
+        )
+        return response["AvailabilityZones"][0]["ZoneName"]
 
     def create_instances(self, instances):
         assert isinstance(instances, int) and instances > 0
@@ -170,6 +177,7 @@ class InstanceManager:
                 self.clients.values(), prefix=f"Creating {size} instances"
             )
             for client in progress:
+                az = self._get_first_az(client)
                 client.run_instances(
                     ImageId=self._get_ami(client),
                     InstanceType=self.settings.instance_type,
@@ -177,6 +185,7 @@ class InstanceManager:
                     MaxCount=instances,
                     MinCount=instances,
                     SecurityGroups=[self.settings.testbed],
+                    Placement={"AvailabilityZone": az},
                     TagSpecifications=[
                         {
                             "ResourceType": "instance",
@@ -199,6 +208,11 @@ class InstanceManager:
             # Wait for the instances to boot.
             Print.info("Waiting for all instances to boot...")
             self._wait(["pending"])
+
+            # Wait for cloud-init to complete (configures apt sources)
+            Print.info("Waiting 30s for cloud-init to complete...")
+            sleep(30)
+
             Print.heading(f"Successfully created {size} new instances")
         except ClientError as e:
             raise BenchError("Failed to create AWS instances", AWSError(e))
