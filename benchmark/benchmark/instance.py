@@ -20,11 +20,12 @@ class InstanceManager:
         assert isinstance(settings, Settings)
         self.settings = settings
         self.clients = OrderedDict()
-        for region in settings.aws_regions:
-            self.clients[region] = boto3.client("ec2", region_name=region)
+        if settings.instance.type == 'aws':
+            for region in settings.instance.aws_regions:
+                self.clients[region] = boto3.client("ec2", region_name=region)
 
     @classmethod
-    def make(cls, settings_file="settings.json"):
+    def make(cls, settings_file="settings-teleport.json"):
         try:
             return cls(Settings.load(settings_file))
         except SettingsError as e:
@@ -265,22 +266,29 @@ class InstanceManager:
         except ClientError as e:
             raise BenchError(AWSError(e))
 
-    def hosts(self, flat=False):
-        try:
-            _, ips = self._get(["pending", "running"])
-            return [x for y in ips.values() for x in y] if flat else ips
-        except ClientError as e:
-            raise BenchError("Failed to gather instances IPs", AWSError(e))
+    def hosts(self):
+        if self.settings.instance.type == 'teleport':
+                return {
+                    self.settings.auth.proxy: self.settings.instance.hosts
+                }
+        else:
+            try:
+                _, ips = self._get(["pending", "running"])
+                return ips
+            except ClientError as e:
+                raise BenchError("Failed to gather instances IPs", AWSError(e))
 
     def print_info(self):
         hosts = self.hosts()
-        key = self.settings.key_path
         text = ""
         for region, ips in hosts.items():
             text += f"\n Region: {region.upper()}\n"
             for i, ip in enumerate(ips):
                 new_line = "\n" if (i + 1) % 6 == 0 else ""
-                text += f"{new_line} {i}\tssh -i {key} ubuntu@{ip}\n"
+                if self.settings.auth.type == 'ssh':
+                    text += f"{new_line} {i}\tssh -i {self.settings.auth.key_path} {self.settings.auth.user}@{ip}\n"
+                else:
+                    text += f"{new_line} {i}\ttsh ssh {self.settings.auth.user}@{ip}\n"
         print(
             "\n"
             "----------------------------------------------------------------\n"

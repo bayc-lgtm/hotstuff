@@ -10,71 +10,62 @@ class BenchError(Exception):
 
 
 class PathMaker:
-    @staticmethod
-    def binary_path():
-        return join('..', 'target', 'release')
+    workspace: str
 
-    @staticmethod
-    def node_crate_path():
-        return join('..', 'node')
+    def __init__(self, workspace):
+        self.workspace = workspace
 
-    @staticmethod
-    def committee_file():
-        return '.committee.json'
+    def binary_path(self):
+        return join(self.workspace, '..', 'target', 'release')
 
-    @staticmethod
-    def parameters_file():
-        return '.parameters.json'
+    def node_crate_path(self):
+        return join(self.workspace, '..', 'node')
 
-    @staticmethod
-    def key_file(i):
+    def committee_file(self):
+        return join(self.workspace, '.committee.json')
+
+    def parameters_file(self):
+        return join(self.workspace, '.parameters.json')
+
+    def key_file(self, i):
         assert isinstance(i, int) and i >= 0
-        return f'.node-{i}.json'
+        return join(self.workspace, f'.node-{i}.json')
 
-    @staticmethod
-    def db_path(i):
+    def db_path(self, i):
         assert isinstance(i, int) and i >= 0
-        return f'.db-{i}'
+        return join(self.workspace, f'.db-{i}')
 
-    @staticmethod
-    def logs_path():
-        return 'logs'
+    def logs_path(self):
+        return join(self.workspace, 'logs')
 
-    @staticmethod
-    def node_log_file(i):
+    def node_log_file(self, i):
         assert isinstance(i, int) and i >= 0
-        return join(PathMaker.logs_path(), f'node-{i}.log')
+        return join(self.logs_path(), f'node-{i}.log')
 
-    @staticmethod
-    def client_log_file(i):
+    def client_log_file(self, i):
         assert isinstance(i, int) and i >= 0
-        return join(PathMaker.logs_path(), f'client-{i}.log')
+        return join(self.logs_path(), f'client-{i}.log')
 
-    @staticmethod
-    def results_path():
-        return 'results'
+    def results_path(self):
+        return join(self.workspace, 'results')
 
-    @staticmethod
-    def result_file(faults, nodes, rate, tx_size):
+    def result_file(self, faults, nodes, rate, tx_size):
         return join(
-            PathMaker.results_path(), 
+            self.results_path(), 
             f'bench-{faults}-{nodes}-{rate}-{tx_size}.txt'
         )
 
-    @staticmethod
-    def plots_path():
-        return 'plots'
+    def plots_path(self):
+        return join(self.workspace, 'plots')
 
-    @staticmethod
-    def agg_file(type, faults, nodes, rate, tx_size, max_latency):
+    def agg_file(self, type, faults, nodes, rate, tx_size, max_latency):
         return join(
-            PathMaker.plots_path(),
+            self.plots_path(),
             f'{type}-{faults}-{nodes}-{rate}-{tx_size}-{max_latency}.txt'
         )
 
-    @staticmethod
-    def plot_file(name, ext):
-        return join(PathMaker.plots_path(), f'{name}.{ext}')
+    def plot_file(self, name, ext):
+        return join(self.plots_path(), f'{name}.{ext}')
 
 
 class Color:

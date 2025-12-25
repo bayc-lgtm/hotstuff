@@ -1,12 +1,9 @@
 from fabric import Connection, ThreadingGroup as Group
 from fabric.exceptions import GroupException
-from paramiko import RSAKey
-from paramiko.ssh_exception import PasswordRequiredException, SSHException
-from os.path import basename, splitext
+from os.path import basename, splitext, relpath
 from time import sleep
 from math import ceil
-from os.path import join
-import subprocess
+import subprocess, base64, urllib3
 
 from benchmark.config import (
     Committee,
@@ -20,6 +17,24 @@ from benchmark.commands import CommandMaker
 from benchmark.logs import LogParser, ParseError
 from benchmark.instance import InstanceManager
 
+
+def _upload_file_content(connection, local_path, remote_dir):
+    """Upload a file by reading content and creating it remotely (workaround for no SFTP support)."""
+    with open(local_path, 'r') as f:
+        content = f.read()
+    remote_path = f"{remote_dir}/{basename(local_path)}"
+    encoded = base64.b64encode(content.encode()).decode()
+    connection.run(f"sudo bash -c 'echo {encoded} | base64 -d > {remote_path}'", hide=True)
+
+def _download_file(host, port, remote_dir, remote_file, local_file):
+    """Download a file via HTTP served by miniserve."""
+    url = f'http://{host}:{port}/{relpath(remote_file, remote_dir)}'
+    http = urllib3.PoolManager()
+    response = http.request('GET', url)
+    if response.status != 200:
+        raise BenchError(f"Failed to download file from {url} (status code: {response.status})")
+    with open(local_file, 'wb') as f:
+        f.write(response.data)
 
 class FabricError(Exception):
     """Wrapper for Fabric exception with a meaningfull error message."""
@@ -38,13 +53,14 @@ class Bench:
     def __init__(self, ctx):
         self.manager = InstanceManager.make()
         self.settings = self.manager.settings
-        try:
-            ctx.connect_kwargs.pkey = RSAKey.from_private_key_file(
-                self.manager.settings.key_path
-            )
-            self.connect = ctx.connect_kwargs
-        except (IOError, PasswordRequiredException, SSHException) as e:
-            raise BenchError("Failed to load SSH key", e)
+        if self.settings.auth.type == 'teleport':
+            sudo = True
+            workspace = f'/root/{self.settings.repo_name}/benchmark'
+        else:
+            sudo = False
+            workspace = f'.'
+        self.command_maker = CommandMaker(workspace, sudo)
+        self.local_command_maker = CommandMaker(f'.', False)
 
     def _check_stderr(self, output):
         if isinstance(output, dict):
@@ -65,19 +81,22 @@ class Bench:
             "sudo apt-get -y install build-essential",
             "sudo apt-get -y install cmake",
             # Install rust (non-interactive).
-            'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y',
-            "source $HOME/.cargo/env",
-            "rustup default stable",
+            'sudo curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sudo sh -s -- -y',
+            # Following two commands don't work with sudo
+            # "source $HOME/.cargo/env",
+            # "rustup default stable",
             # This is missing from the Rocksdb installer (needed for Rocksdb).
             "sudo apt-get install -y clang",
+            # We need this for downloading logs from teleport
+            "sudo /root/.cargo/bin/cargo install miniserve",
             # Clone the repo.
-            f"(git clone {self.settings.repo_url} || (cd {self.settings.repo_name} ; git pull))",
+            f"(sudo git clone {self.settings.repo_url} /root/{self.settings.repo_name} ; sudo git -C /root/{self.settings.repo_name} pull)",
         ]
-        hosts = self.manager.hosts(flat=True)
+        connections = self._connections()
         try:
-            g = Group(*hosts, user="ubuntu", connect_kwargs=self.connect)
+            g = Group.from_connections(connections)
             g.run(" && ".join(cmd), hide=True)
-            Print.heading(f"Initialized testbed of {len(hosts)} nodes")
+            Print.heading(f"Initialized testbed of {len(connections)} nodes")
         except (GroupException, ExecutionError) as e:
             e = FabricError(e) if isinstance(e, GroupException) else e
             raise BenchError("Failed to install repo on testbed", e)
@@ -85,14 +104,24 @@ class Bench:
     def kill(self, hosts=[], delete_logs=False):
         assert isinstance(hosts, list)
         assert isinstance(delete_logs, bool)
-        hosts = hosts if hosts else self.manager.hosts(flat=True)
-        delete_logs = CommandMaker.clean_logs() if delete_logs else "true"
-        cmd = [delete_logs, f"({CommandMaker.kill()} || true)"]
+        connections = self._connections(hosts)
+        delete_logs = self.command_maker.clean_logs() if delete_logs else "true"
+        cmd = [delete_logs, f"({self.command_maker.kill()} || true)"]
         try:
-            g = Group(*hosts, user="ubuntu", connect_kwargs=self.connect)
+            g = Group.from_connections(connections)
             g.run(" && ".join(cmd), hide=True)
         except GroupException as e:
             raise BenchError("Failed to kill nodes", FabricError(e))
+
+    def _connections(self, hosts: list[str] = []) -> list[Connection]:
+        if not hosts:
+            region_hosts = self.manager.hosts()
+            hosts = [ip for ips in region_hosts.values() for ip in ips]
+
+        return [self._connection(host) for host in hosts]
+
+    def _connection(self, host: str) -> Connection:
+        return Connection(host=host, user=self.settings.auth.user, connect_kwargs=self.settings.auth.connect_kwargs(host))
 
     def _select_hosts(self, bench_parameters):
         nodes = max(bench_parameters.nodes)
@@ -109,44 +138,44 @@ class Bench:
 
     def _background_run(self, host, command, log_file):
         name = splitext(basename(log_file))[0]
-        cmd = f'tmux new -d -s "{name}" "{command} |& tee {log_file}"'
-        c = Connection(host, user="ubuntu", connect_kwargs=self.connect)
+        cmd = f'sudo tmux new -d -s "{name}" "{command} |& sudo tee {log_file}"'
+        c = self._connection(host)
         output = c.run(cmd, hide=True)
         self._check_stderr(output)
 
     def _update(self, hosts):
         Print.info(f'Updating {len(hosts)} nodes (branch "{self.settings.branch}")...')
         cmd = [
-            f"(cd {self.settings.repo_name} && git fetch -f)",
-            f"(cd {self.settings.repo_name} && git checkout -f {self.settings.branch})",
-            f"(cd {self.settings.repo_name} && git pull -f)",
-            "source $HOME/.cargo/env",
-            f"(cd {self.settings.repo_name}/node && {CommandMaker.compile()})",
-            CommandMaker.alias_binaries(f"./{self.settings.repo_name}/target/release/"),
+            f"sudo git -C /root/{self.settings.repo_name} fetch -f",
+            f"sudo git -C /root/{self.settings.repo_name} checkout -f {self.settings.branch}",
+            f"sudo git -C /root/{self.settings.repo_name} pull -f",
+            # "source $HOME/.cargo/env",
+            self.command_maker.compile(),
+            self.command_maker.alias_binaries(f"/root/{self.settings.repo_name}/target/release"),
         ]
-        g = Group(*hosts, user="ubuntu", connect_kwargs=self.connect)
+        g = Group.from_connections(self._connections(hosts))
         g.run(" && ".join(cmd), hide=True)
 
     def _config(self, hosts, node_parameters):
         Print.info("Generating configuration files...")
 
         # Cleanup all local configuration files.
-        cmd = CommandMaker.cleanup()
+        cmd = self.local_command_maker.cleanup()
         subprocess.run([cmd], shell=True, stderr=subprocess.DEVNULL)
 
         # Recompile the latest code.
-        cmd = CommandMaker.compile().split()
-        subprocess.run(cmd, check=True, cwd=PathMaker.node_crate_path())
+        cmd = self.local_command_maker.compile().split()
+        subprocess.run(cmd, check=True, cwd=self.local_command_maker.path_maker.node_crate_path())
 
         # Create alias for the client and nodes binary.
-        cmd = CommandMaker.alias_binaries(PathMaker.binary_path())
-        subprocess.run([cmd], shell=True)
+        cmds = self.local_command_maker.alias_binaries(self.local_command_maker.path_maker.binary_path())
+        subprocess.run(cmds, shell=True)
 
         # Generate configuration files.
         keys = []
-        key_files = [PathMaker.key_file(i) for i in range(len(hosts))]
+        key_files = [self.local_command_maker.path_maker.key_file(i) for i in range(len(hosts))]
         for filename in key_files:
-            cmd = CommandMaker.generate_key(filename).split()
+            cmd = self.local_command_maker.generate_key(filename).split()
             subprocess.run(cmd, check=True)
             keys += [Key.from_file(filename)]
 
@@ -155,22 +184,22 @@ class Bench:
         front_addr = [f"{x}:{self.settings.front_port}" for x in hosts]
         mempool_addr = [f"{x}:{self.settings.mempool_port}" for x in hosts]
         committee = Committee(names, consensus_addr, front_addr, mempool_addr)
-        committee.print(PathMaker.committee_file())
+        committee.print(self.local_command_maker.path_maker.committee_file())
 
-        node_parameters.print(PathMaker.parameters_file())
+        node_parameters.print(self.local_command_maker.path_maker.parameters_file())
 
         # Cleanup all nodes.
-        cmd = f"{CommandMaker.cleanup()} || true"
-        g = Group(*hosts, user="ubuntu", connect_kwargs=self.connect)
+        cmd = f"{self.command_maker.cleanup()} || true"
+        g = Group.from_connections(self._connections(hosts))
         g.run(cmd, hide=True)
 
         # Upload configuration files.
         progress = progress_bar(hosts, prefix="Uploading config files:")
         for i, host in enumerate(progress):
-            c = Connection(host, user="ubuntu", connect_kwargs=self.connect)
-            c.put(PathMaker.committee_file(), ".")
-            c.put(PathMaker.key_file(i), ".")
-            c.put(PathMaker.parameters_file(), ".")
+            c = self._connection(host)
+            _upload_file_content(c, self.local_command_maker.path_maker.committee_file(), self.command_maker.workspace)
+            _upload_file_content(c, self.local_command_maker.path_maker.key_file(i), self.command_maker.workspace)
+            _upload_file_content(c, self.local_command_maker.path_maker.parameters_file(), self.command_maker.workspace)
 
         return committee
 
@@ -183,27 +212,27 @@ class Bench:
         # Run the clients (they will wait for the nodes to be ready).
         # Filter all faulty nodes from the client addresses (or they will wait
         # for the faulty nodes to be online).
-        committee = Committee.load(PathMaker.committee_file())
+        committee = Committee.load(self.local_command_maker.path_maker.committee_file())
         addresses = [f"{x}:{self.settings.front_port}" for x in hosts]
         rate_share = ceil(rate / committee.size())  # Take faults into account.
         timeout = node_parameters.timeout_delay
-        client_logs = [PathMaker.client_log_file(i) for i in range(len(hosts))]
+        client_logs = [self.command_maker.path_maker.client_log_file(i) for i in range(len(hosts))]
         for host, addr, log_file in zip(hosts, addresses, client_logs):
-            cmd = CommandMaker.run_client(
+            cmd = self.command_maker.run_client(
                 addr, bench_parameters.tx_size, rate_share, timeout, nodes=addresses
             )
             self._background_run(host, cmd, log_file)
 
         # Run the nodes.
-        key_files = [PathMaker.key_file(i) for i in range(len(hosts))]
-        dbs = [PathMaker.db_path(i) for i in range(len(hosts))]
-        node_logs = [PathMaker.node_log_file(i) for i in range(len(hosts))]
+        key_files = [self.command_maker.path_maker.key_file(i) for i in range(len(hosts))]
+        dbs = [self.command_maker.path_maker.db_path(i) for i in range(len(hosts))]
+        node_logs = [self.command_maker.path_maker.node_log_file(i) for i in range(len(hosts))]
         for host, key_file, db, log_file in zip(hosts, key_files, dbs, node_logs):
-            cmd = CommandMaker.run_node(
+            cmd = self.command_maker.run_node(
                 key_file,
-                PathMaker.committee_file(),
+                self.command_maker.path_maker.committee_file(),
                 db,
-                PathMaker.parameters_file(),
+                self.command_maker.path_maker.parameters_file(),
                 debug=debug,
             )
             self._background_run(host, cmd, log_file)
@@ -220,19 +249,36 @@ class Bench:
 
     def _logs(self, hosts, faults):
         # Delete local logs (if any).
-        cmd = CommandMaker.clean_logs()
+        cmd = self.local_command_maker.clean_logs()
         subprocess.run([cmd], shell=True, stderr=subprocess.DEVNULL)
 
         # Download log files.
         progress = progress_bar(hosts, prefix="Downloading logs:")
         for i, host in enumerate(progress):
-            c = Connection(host, user="ubuntu", connect_kwargs=self.connect)
-            c.get(PathMaker.node_log_file(i), local=PathMaker.node_log_file(i))
-            c.get(PathMaker.client_log_file(i), local=PathMaker.client_log_file(i))
+            # Start miniserve to download file via HTTP.
+            logs_path = self.command_maker.path_maker.logs_path()
+            cmd = self.command_maker.miniserve(logs_path, self.settings.miniserve_port)
+            self._background_run(host, cmd, f'{logs_path}/miniserve.log')
+
+            _download_file(
+                host,
+                self.settings.miniserve_port,
+                logs_path,
+                self.command_maker.path_maker.node_log_file(i),
+                self.local_command_maker.path_maker.node_log_file(i)
+            )
+            _download_file(
+                host,
+                self.settings.miniserve_port,
+                logs_path,
+                self.command_maker.path_maker.client_log_file(i),
+                self.local_command_maker.path_maker.client_log_file(i)
+            )
+        self.kill(hosts=hosts, delete_logs=False)
 
         # Parse logs and return the parser.
         Print.info("Parsing logs and computing performance...")
-        return LogParser.process(PathMaker.logs_path(), faults=faults)
+        return LogParser.process(self.local_command_maker.path_maker.logs_path(), faults=faults)
 
     def run(self, bench_parameters_dict, node_parameters_dict, debug=False):
         assert isinstance(debug, bool)
@@ -282,7 +328,7 @@ class Bench:
                             hosts, r, bench_parameters, node_parameters, debug
                         )
                         self._logs(hosts, faults).print(
-                            PathMaker.result_file(
+                            self.local_command_maker.path_maker.result_file(
                                 faults, n, r, bench_parameters.tx_size
                             )
                         )

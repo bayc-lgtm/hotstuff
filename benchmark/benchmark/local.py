@@ -16,6 +16,7 @@ class LocalBench:
         try:
             self.bench_parameters = BenchParameters(bench_parameters_dict)
             self.node_parameters = NodeParameters(node_parameters_dict)
+            self.command_maker = CommandMaker('.', False)
         except ConfigError as e:
             raise BenchError('Invalid nodes or bench parameters', e)
 
@@ -29,7 +30,7 @@ class LocalBench:
 
     def _kill_nodes(self):
         try:
-            cmd = CommandMaker.kill().split()
+            cmd = self.command_maker.kill().split()
             subprocess.run(cmd, stderr=subprocess.DEVNULL)
         except subprocess.SubprocessError as e:
             raise BenchError('Failed to kill testbed', e)
@@ -46,31 +47,31 @@ class LocalBench:
             nodes, rate = self.nodes[0], self.rate[0]
 
             # Cleanup all files.
-            cmd = f'{CommandMaker.clean_logs()} ; {CommandMaker.cleanup()}'
+            cmd = f'{self.command_maker.clean_logs()} ; {self.command_maker.cleanup()}'
             subprocess.run([cmd], shell=True, stderr=subprocess.DEVNULL)
             sleep(0.5)  # Removing the store may take time.
 
             # Recompile the latest code.
-            cmd = CommandMaker.compile().split()
-            subprocess.run(cmd, check=True, cwd=PathMaker.node_crate_path())
+            cmd = self.command_maker.compile().split()
+            subprocess.run(cmd, check=True, cwd=self.command_maker.path_maker.node_crate_path())
 
             # Create alias for the client and nodes binary.
-            cmd = CommandMaker.alias_binaries(PathMaker.binary_path())
+            cmd = self.command_maker.alias_binaries(self.command_maker.path_maker.binary_path())
             subprocess.run([cmd], shell=True)
 
             # Generate configuration files.
             keys = []
-            key_files = [PathMaker.key_file(i) for i in range(nodes)]
+            key_files = [self.command_maker.path_maker.key_file(i) for i in range(nodes)]
             for filename in key_files:
-                cmd = CommandMaker.generate_key(filename).split()
+                cmd = self.command_maker.generate_key(filename).split()
                 subprocess.run(cmd, check=True)
                 keys += [Key.from_file(filename)]
 
             names = [x.name for x in keys]
             committee = LocalCommittee(names, self.BASE_PORT)
-            committee.print(PathMaker.committee_file())
+            committee.print(self.command_maker.path_maker.committee_file())
 
-            self.node_parameters.print(PathMaker.parameters_file())
+            self.node_parameters.print(self.command_maker.path_maker.parameters_file())
 
             # Do not boot faulty nodes.
             nodes = nodes - self.faults
@@ -79,9 +80,9 @@ class LocalBench:
             addresses = committee.front
             rate_share = ceil(rate / nodes)
             timeout = self.node_parameters.timeout_delay
-            client_logs = [PathMaker.client_log_file(i) for i in range(nodes)]
+            client_logs = [self.command_maker.path_maker.client_log_file(i) for i in range(nodes)]
             for addr, log_file in zip(addresses, client_logs):
-                cmd = CommandMaker.run_client(
+                cmd = self.command_maker.run_client(
                     addr,
                     self.tx_size,
                     rate_share,
@@ -91,14 +92,14 @@ class LocalBench:
                 self._background_run(cmd, log_file)
 
             # Run the nodes.
-            dbs = [PathMaker.db_path(i) for i in range(nodes)]
-            node_logs = [PathMaker.node_log_file(i) for i in range(nodes)]
+            dbs = [self.command_maker.path_maker.db_path(i) for i in range(nodes)]
+            node_logs = [self.command_maker.path_maker.node_log_file(i) for i in range(nodes)]
             for key_file, db, log_file in zip(key_files, dbs, node_logs):
-                cmd = CommandMaker.run_node(
+                cmd = self.command_maker.run_node(
                     key_file,
-                    PathMaker.committee_file(),
+                    self.command_maker.path_maker.committee_file(),
                     db,
-                    PathMaker.parameters_file(),
+                    self.command_maker.path_maker.parameters_file(),
                     debug=debug
                 )
                 self._background_run(cmd, log_file)

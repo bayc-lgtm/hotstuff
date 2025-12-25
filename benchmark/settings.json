@@ -2,12 +2,13 @@
     "testbed": "alberto-hotstuff",
     "key": {
         "name": "aws",
-        "path": "/Users/alberto/.ssh/aws"
+        "path": "/Users/bay/.ssh/hotstuff-key.pem"
     },
     "ports": {
         "consensus": 8000,
         "mempool": 7000,
-        "front": 6000
+        "front": 6000,
+        "miniserve": 9000
     },
     "repo": {
         "name": "hotstuff",

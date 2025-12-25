@@ -1,0 +1,24 @@
+{
+    "testbed": "bay-hotstuff",
+    "ports": {
+        "consensus": 8000,
+        "mempool": 7000,
+        "front": 6000,
+        "miniserve": 9000
+    },
+    "repo": {
+        "name": "hotstuff",
+        "url": "https://github.com/asonnino/hotstuff.git",
+        "branch": "main"
+    },
+    "teleport": {
+        "proxy": "tele-bnbdev.iac.toolsfdg.net:8024",
+        "user": "bay.c",
+        "hosts": [
+            "10.100.7.253",
+            "10.100.7.45",
+            "10.100.7.55",
+            "10.100.7.165"
+        ]
+    }
+}
