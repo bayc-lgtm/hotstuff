@@ -58,6 +58,21 @@ This command may take a long time the first time you run it (compiling rust code
 -----------------------------------------
 ```
 
+## Remote Benchmark with Teleport
+
+- Install `tsh` 15.5.4 from https://cdn.teleport.dev/teleport-v15.5.4-darwin-arm64-bin.tar.gz.
+- `tsh login --proxy=your-proxy`.
+- Go to `benchmark/settings-teleport.json` and fill in your proxy, user and available hosts.
+- Run `fab info`. It prints `tsh` commands to connect to each host. Run of of them to verify that everything is working.
+- `fab install` to set up the remote hosts. This may take a while the first time.
+- `fab remote` to run a benchmark across the remote hosts.
+
+Note that `tsh login` has to run every 12 hours to refresh credentials.
+
+If fabric throws "Authentication failed" errors, just retry.
+
+The remote benchmark logs will be downloaded and parsed. The result will be written to `benchmark/results/`.
+
 ## Next Steps
 
 The [wiki](https://github.com/asonnino/hotstuff/wiki) documents the codebase, explains its architecture and how to read benchmarks' results, and provides a step-by-step tutorial to run [benchmarks on Amazon Web Services](https://github.com/asonnino/hotstuff/wiki/AWS-Benchmarks) across multiple data centers (WAN).
